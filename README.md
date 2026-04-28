@@ -32,37 +32,24 @@ This fork runs as standalone scripts instead of a TPM plugin, with a popup-style
 
 ## Installation
 
-Add the keybindings to your `~/.tmux.conf`:
+Using [TPM](https://github.com/tmux-plugins/tpm), add this to your `~/.tmux.conf`:
 
 ```sh
-bind-key f run-shell 'bash ~/.config/tmux/tmux-lazy-restore/scripts/tmux-session-manager.sh choose'
-bind-key r run-shell 'bash ~/.config/tmux/tmux-lazy-restore/scripts/tmux-session-manager.sh revert'
-bind-key X run-shell 'bash ~/.config/tmux/tmux-lazy-restore/scripts/tmux-session-manager.sh delete'
-bind-key C-r run-shell 'bash ~/.config/tmux/tmux-lazy-restore/scripts/tmux-session-manager.sh restore_all'
-bind-key C-s run-shell 'bash ~/.config/tmux/tmux-lazy-restore/scripts/tmux-session-manager.sh save_all'
+set -g @plugin 'andrwui/tmux-lazy-restore'
 ```
 
-## Auto-Save Hooks
+Keybindings, auto-save hooks, and startup are all configured automatically by the plugin. No manual setup needed.
 
-Add these hooks to `~/.tmux.conf` to automatically save session state on changes:
+### Customizing Key Bindings
 
-```sh
-set-hook -g after-new-window 'run-shell "bash ~/.config/tmux/tmux-lazy-restore/scripts/tmux-session-manager.sh auto_save"'
-set-hook -g after-kill-pane 'run-shell "bash ~/.config/tmux/tmux-lazy-restore/scripts/tmux-session-manager.sh auto_save"'
-set-hook -g after-split-window 'run-shell "bash ~/.config/tmux/tmux-lazy-restore/scripts/tmux-session-manager.sh auto_save"'
-set-hook -g after-rename-window 'run-shell "bash ~/.config/tmux/tmux-lazy-restore/scripts/tmux-session-manager.sh auto_save"'
-set-hook -g session-created 'run-shell "bash ~/.config/tmux/tmux-lazy-restore/scripts/tmux-session-manager.sh auto_save"'
-set-hook -g session-closed 'run-shell "bash ~/.config/tmux/tmux-lazy-restore/scripts/tmux-session-manager.sh auto_save"'
-set-hook -g window-linked 'run-shell "bash ~/.config/tmux/tmux-lazy-restore/scripts/tmux-session-manager.sh auto_save"'
-set-hook -g window-unlinked 'run-shell "bash ~/.config/tmux/tmux-lazy-restore/scripts/tmux-session-manager.sh auto_save"'
-```
-
-## Startup
-
-Add this to your `~/.tmux.conf` to auto-restore your last active session and ensure the `default` session is always present:
+Override the defaults by setting these options before the plugin line:
 
 ```sh
-run-shell 'bash ~/.config/tmux/tmux-lazy-restore/scripts/tmux-session-manager.sh startup'
+set -g @tmux-lazy-restore-choose-key 'f'
+set -g @tmux-lazy-restore-revert-key 'r'
+set -g @tmux-lazy-restore-delete-key 'X'
+set -g @tmux-lazy-restore-restore-all-key 'C-r'
+set -g @tmux-lazy-restore-save-all-key 'C-s'
 ```
 
 ## Key Bindings
