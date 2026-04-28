@@ -13,142 +13,109 @@ ensure_default_session() {
   fi
 }
 
-# Function: save_sessions
-# Description: Saves all of the current tmux sessions, windows, and panes to a file to be later restored
-# Parameters:
-# Returns:
+write_session_file() {
+  local tmp="${SESSION_FILE}.tmp.$$"
+  cat > "$tmp" && mv "$tmp" "$SESSION_FILE"
+}
+
 save_sessions() {
-  # Start spinner (unless quiet mode)
+  local lock="${SESSION_FILE}.lock"
+  {
+    flock -n 9 || return 0
+  } 9>"$lock"
+
   if [ "$QUIET" != "1" ]; then
     start_spinner_with_message "SAVING ALL SESSIONS"
   fi
 
-  # Mark all sessions as inactive
-  jq '(.sessions[] | .active) = "0"' "$SESSION_FILE" > "$SESSION_FILE.tmp" && mv "$SESSION_FILE.tmp" "$SESSION_FILE"
+  jq '(.sessions[] | .active) = "0"' "$SESSION_FILE" | write_session_file
 
-  # For each session
   tmux list-sessions -F "#{session_name}:#{session_id}" | while IFS=: read -r session_name session_id; do
-    # Set the current session as "active" so we can activate again upon restoring
     session_active=0
     if [ "$session_name" == "$(tmux display-message -p '#{session_name}')" ]; then
         session_active=1;
     fi
 
-    # Get all of the data for this session, including windows and panes
     updated_session_data=$(get_session_data "$session_name" "$session_id" "$session_active")
 
-    # Get the existing session data from the sessions file (if it exists)
+    if [ -z "$updated_session_data" ] || ! echo "$updated_session_data" | jq '.' > /dev/null 2>&1; then
+      continue
+    fi
+
     existing_session_data=$(jq --arg session_name "$session_name" '.sessions[] | select(.name == $session_name)' "$SESSION_FILE")
 
-    # If this session exists in the session file
     if [ -n "$existing_session_data" ]; then
-      # Update the current session in the sessions file
-      jq --arg session_name "$session_name" --argjson new_data "$updated_session_data" '.sessions |= map(if .name == $session_name then $new_data else . end)' "$SESSION_FILE" > "$SESSION_FILE.tmp" && mv "$SESSION_FILE.tmp" "$SESSION_FILE"
+      jq --arg session_name "$session_name" --argjson new_data "$updated_session_data" '.sessions |= map(if .name == $session_name then $new_data else . end)' "$SESSION_FILE" | write_session_file
     else
-      # Otherwise add the new session to the sessions file
-      jq --argjson new_data "$updated_session_data" '.sessions += [$new_data]' "$SESSION_FILE" > "$SESSION_FILE.tmp" && mv "$SESSION_FILE.tmp" "$SESSION_FILE"
+      jq --argjson new_data "$updated_session_data" '.sessions += [$new_data]' "$SESSION_FILE" | write_session_file
     fi
   done
 
-  # Pretty-print the new sessions file
-  jq '.' "$SESSION_FILE" > "$SESSION_FILE.tmp" && mv "$SESSION_FILE.tmp" "$SESSION_FILE"
+  jq '.' "$SESSION_FILE" | write_session_file
 
-  # All done saving (unless quiet mode)
   if [ "$QUIET" != "1" ]; then
     stop_spinner_with_message "SESSION SAVED"
   fi
 }
 
-# Function: get_session_data
-# Description: Helper method to get all of the data associated with the specified session
-# Parameters:
-#   $1 - Session name
-#   $2 - Session ID
-#   $3 - Session active status
-# Returns:
 get_session_data() {
   session_name=$1
   session_id=$2
   session_active=$3
-  # Write out this session
-  echo "{"
-  echo "\"name\":\"$session_name\","
-  echo "\"active\":\"$session_active\","
-  echo "\"windows\": ["
-  # For each window
-  first_window=true
-  tmux list-windows -t "$session_id" -F "#{window_index}:#{window_name}:#{window_id}:#{window_active}:#{window_zoomed_flag}:#{window_layout}" | while IFS=: read -r window_index window_name window_id window_active window_zoomed_flag window_layout; do
-    # If this is not the first window add a comma after the previous item
-    if [ "$first_window" != "true" ]; then echo ","; fi
-    first_window=false
-    # Write out this window
-    echo "{"
-    echo "\"index\":$window_index,"
-    echo "\"name\":\"$window_name\","
-    echo "\"active\":\"$window_active\","
-    echo "\"zoomed\":\"$window_zoomed_flag\","
-    echo "\"layout\":\"$window_layout\","
-    echo "\"panes\": ["
-    first_pane=true
-    tmux list-panes -t "$window_id" -F "#{pane_index}:#{pane_id}:#{pane_active}:#{pane_current_path}:#{pane_pid}" | while IFS=: read -r pane_index pane_id pane_active pane_current_path pane_pid; do
-      # If this is not the first pane add a comma after the previous item
-      if [ "$first_pane" != "true" ]; then echo ","; fi
-      first_pane=false
-      # Get the command line arguments for the process running this pane
-      pane_command=$(ps --ppid "$pane_pid" -o args= 2>/dev/null | sed 's/"/\\"/g' | sed 's/\n//') # Escape quotes for JSON
-      # Don't include this plugin's command in the saved session
+
+  local windows_json="[]"
+  while IFS=: read -r window_index window_name window_id window_active window_zoomed_flag window_layout; do
+    local panes_json="[]"
+    while IFS=: read -r pane_index pane_id pane_active pane_current_path pane_pid; do
+      local pane_command=$(ps --ppid "$pane_pid" -o args= 2>/dev/null | sed 's/"/\\"/g' | sed 's/\n//')
       if [[ "$pane_command" == *"tmux-session-manager"* ]]; then
         pane_command=""
       fi
+      local pane_json=$(jq -n \
+        --arg index "$pane_index" \
+        --arg active "$pane_active" \
+        --arg path "$pane_current_path" \
+        --arg command "$pane_command" \
+        '{index: ($index|tonumber), active: $active, path: $path, command: $command}')
+      panes_json=$(echo "$panes_json" | jq --argjson p "$pane_json" '. += [$p]')
+    done < <(tmux list-panes -t "$window_id" -F "#{pane_index}:#{pane_id}:#{pane_active}:#{pane_current_path}:#{pane_pid}")
 
-      # Write out this pane
-      echo "{"
-      echo "\"index\": $pane_index,"
-      echo "\"active\": \"$pane_active\","
-      echo "\"path\": \"$pane_current_path\","
-      echo "\"command\": \"$pane_command\""
-      echo "}"
-    done
-    # End panes
-    echo "]}"
-  done
-  # End windows
-  echo "]}"
+    local window_json=$(jq -n \
+      --arg index "$window_index" \
+      --arg name "$window_name" \
+      --arg active "$window_active" \
+      --arg zoomed "$window_zoomed_flag" \
+      --arg layout "$window_layout" \
+      --argjson panes "$panes_json" \
+      '{index: ($index|tonumber), name: $name, active: $active, zoomed: $zoomed, layout: $layout, panes: $panes}')
+    windows_json=$(echo "$windows_json" | jq --argjson w "$window_json" '. += [$w]')
+  done < <(tmux list-windows -t "$session_id" -F "#{window_index}:#{window_name}:#{window_id}:#{window_active}:#{window_zoomed_flag}:#{window_layout}")
+
+  jq -n \
+    --arg name "$session_name" \
+    --arg active "$session_active" \
+    --argjson windows "$windows_json" \
+    '{name: $name, active: $active, windows: $windows}'
 }
 
-# Function: restore_sessions
-# Description: Restore one/all tmux sessions from the session file
-# Parameters:
-#   $1 - Session name to restore
-# Returns:
 restore_sessions() {
-  # If this parameter is passed in, only the specified session will be restored, otherwise all sessions will be restored
   restore_session_name=$1
-  # If this parameters is passed in the specified session will be restored even if it is already loaded
   force_restore=$2
 
   active_session_name=""
   active_session_window_index=""
   active_session_pane_index=""
 
-  # How many sessions/windows/panes are running
   initial_session_count=$(tmux list-sessions | wc -l)
   initial_window_count=$(tmux list-windows | wc -l)
   initial_pane_count=$(tmux list-panes | wc -l)
 
-  # Get the current session name
   current_session_name=$(tmux display-message -p '#{session_name}')
-
-  # Get the current window id
   current_window_id=$(tmux display-message -p '#{window_id}')
-
-  # Get the current pane id
   current_pane_id=$(tmux display-message -p '#{pane_id}')
 
-  # If a single session is passed, filter the session file to only the specified session (faster)
   if [ -n "$restore_session_name" ]; then
     start_spinner_with_message "RESTORING: $restore_session_name"
-    # If the specified session is already running and the force option is false, just switch to the session and return
     if tmux has-session -t="$restore_session_name" 2>/dev/null && [ "$force_restore" != "true" ]; then
       tmux switch-client -Z -t="${restore_session_name}"
       stop_spinner_with_message "SESSION ALREADY RUNNING"
@@ -156,39 +123,29 @@ restore_sessions() {
     fi
     sessions=$(jq -c --arg restore_session_name "$restore_session_name" '.sessions[] | select(.name == $restore_session_name)' "$SESSION_FILE")
   else
-    # Otherwise, load all sessions
     start_spinner_with_message "RESTORING ALL SESSIONS"
     sessions=$(jq -c '.sessions[]' "$SESSION_FILE")
   fi
 
-  # For each session
   while IFS= read -r session; do
     session_name=$(jq -r '.name' <<< "$session")
     session_active=$(jq -r '.active' <<< "$session")
     active_window_index=""
 
-    # If the session already exists
     if tmux has-session -t="$session_name" 2>/dev/null; then
-      # This session already exists, so unless the force option is true, skip it
       if [ "$force_restore" != "true" ]; then
         continue
       fi
-      # If the session is not the current session
       if [ "$session_name" != "$current_session_name" ]; then
-        # Kill the session before restoring
         tmux kill-session -t="$session_name"
-        # Start a new session with the specified name
         tmux new-session -d -s "$session_name"
       else
-        # Can't kill the current session, so we just clear it out
         clear_session_contents "$current_session_name" "$current_window_id" "$current_pane_id"
       fi
     else
-      # Session doesn't exist, so start a new session with the specified name
       tmux new-session -d -s "$session_name"
     fi
 
-    # For each window
     windows=$(jq -c '.windows[]' <<< "$session")
     while IFS= read -r window; do
       window_index=$(jq -r '.index' <<< "$window")
@@ -198,17 +155,14 @@ restore_sessions() {
       window_layout=$(jq -r '.layout' <<< "$window")
       active_window_pane_index=""
 
-      # Do not create a new window if this is the fist window because tmux creates a starting window with each session
       if [ "$window_index" -gt 0 ]; then
         tmux new-window -d -t="$session_name" -n "$window_name"
       else
         tmux rename-window -t="$session_name:$window_index" "$window_name"
       fi
 
-      # Select the newly created window
       tmux select-window -t="$session_name:$window_index"
 
-      # For each pane
       panes=$(jq -c '.panes[]' <<< "$window")
       while IFS= read -r pane; do
         pane_index=$(jq -r '.index' <<< "$pane")
@@ -216,7 +170,6 @@ restore_sessions() {
         pane_active=$(jq -r '.active' <<< "$pane")
         pane_command=$(jq -r '.command' <<< "$pane")
 
-        # Keep track of the active session/window/panel so we can restore focus at the end
         if [[ ("$session_active" == "1" || -n "$restore_session_name" || "$active_session_name" == "") && "$window_active" == "1" && "$pane_active" == "1" ]]; then
           active_session_name=$session_name
           active_session_window_index=$window_index
@@ -230,58 +183,42 @@ restore_sessions() {
           active_pane_index=$pane_index
         fi
 
-        # Do not create a new pane if this is the fist pane because tmux creates a starting pane with each window
         if [ "$pane_index" -gt 0 ]; then
           tmux split-window -t="${session_name}:${window_index}" -c "$pane_path"
         fi                
 
-        # Restore the original path and process in its pane
         if [ -n "$pane_path" ] && [ -n "$pane_command" ]; then
           tmux send-keys -t="$session_name:$window_index.$pane_index" "cd \"$pane_path\"" C-m "$pane_command" C-m
         elif [ -n "$pane_command" ]; then
-          # If there was no path, start the process
           tmux send-keys -t="$session_name:$window_index.$pane_index" "$pane_command" C-m
         elif [ -n "$pane_path" ]; then
-          # If there was no process, set the path
           tmux send-keys -t="$session_name:$window_index.$pane_index" "cd \"$pane_path\"" C-m "clear" C-m
         fi
       done <<< "$panes"
 
-      # Restore this window's panel layout
       tmux select-layout -t="$session_name:$window_index" "$window_layout"
-      # Restore selection of the active pane
       tmux select-pane -t="$session_name:$window_index.$active_pane_index"
-      # Restore which panel was zoomed in this window
       if [[ "$window_zoomed_flag" == "1" && -n "$active_pane_index" ]]; then
         tmux resize-pane -t="$session_name:$window_index.$active_pane_index" -Z
       fi
     done <<< "$windows"
 
-    # Restore selection of the active window
     tmux select-window -t="$session_name:$active_window_index.$active_window_pane_index"
 
   done <<< "$sessions"
 
-  # Restore focus on the active session/window/panel
   if [ -n "$active_session_name" ]; then
     tmux switch-client -Z -t="${active_session_name}:${active_session_window_index}.${active_session_pane_index}"
 
-    # Kill the session this command was launched from if it was the only session and that session was empty
     if [ "$KILL_LAUNCH_SESSION" == "on" ] && [ "$active_session_name" != "$current_session_name" ] && [ "$initial_session_count" -eq 1 ] && [ "$initial_window_count" -eq 1 ] && [ "$initial_pane_count" -eq 1 ] && [[ "$current_session_name" =~ ^[0-9]+$ ]]; then
       tmux kill-session -t $current_session_name
     fi
   fi
 
-  # All done restoring
   stop_spinner_with_message "SESSION(S) RESTORED"
 }
 
-# Function: choose_session
-# Description: Display a tmux popup that allows choice of tmux sessions from the session file and live sessions
-# Parameters:
-# Returns:
 choose_session() {
-    # Get the list of session names from the sessions file
     file_sessions_string=$(jq -r '.sessions | .[].name' "$SESSION_FILE")
     declare -A file_sessions
     if [ -n "$file_sessions_string" ]; then
@@ -290,13 +227,11 @@ choose_session() {
       done <<< "$file_sessions_string"
     fi
 
-    # Get the list of session names from the active tmux sessions
     declare -A active_sessions
     while IFS= read -r session_name; do
       active_sessions[$session_name]=1
     done <<< $(tmux list-sessions -F "#{session_name}")
 
-    # Count total entries for popup height
     total_count=0
     for session_name in "${!file_sessions[@]}"; do
       total_count=$((total_count + 1))
@@ -307,7 +242,6 @@ choose_session() {
       fi
     done
 
-    # Create a list of sessions to display in the chooser 
     chooser_sessions=""
     for session_name in "${!file_sessions[@]}"; do
       if [[ -v active_sessions[$session_name] ]]; then
@@ -322,17 +256,12 @@ choose_session() {
       fi
     done
 
-    # Remove trailing newline which would cause an empty fzf entry
     chooser_sessions=${chooser_sessions%\\n}
-
-    # Sort entries alphabetically
     chooser_sessions=$(echo -e "$chooser_sessions" | sort)
 
-    # Popup dimensions
     POPUP_HEIGHT=$((total_count + 4))
     TMPFILE=$(mktemp /tmp/tmux-lazy-restore-fzf.XXXXXX)
 
-    # Display choice of session to user
     tmux popup -E -w "15%" -h "$POPUP_HEIGHT" -d '#{pane_current_path}' "
       echo \"${chooser_sessions}\" | fzf --reverse --border=none --no-info --no-scrollbar --prompt='session > ' --color=bw --expect=ctrl-r,ctrl-k,ctrl-a,ctrl-l,ctrl-u --bind 'esc:abort' > $TMPFILE
     "
@@ -351,7 +280,9 @@ choose_session() {
           [ -z "$new_session" ] && continue
           session_id=$(tmux list-sessions -F '#{session_name}:#{session_id}' | grep "^${new_session}:" | cut -d: -f2)
           new_session_data=$(get_session_data "$new_session" "$session_id" "0")
-          jq --argjson new_data "$new_session_data" '.sessions += [$new_data]' "$SESSION_FILE" > "$SESSION_FILE.tmp" && mv "$SESSION_FILE.tmp" "$SESSION_FILE"
+          if [ -n "$new_session_data" ] && echo "$new_session_data" | jq '.' > /dev/null 2>&1; then
+            jq --argjson new_data "$new_session_data" '.sessions += [$new_data]' "$SESSION_FILE" | write_session_file
+          fi
         done <<< "$new_sessions"
       elif [ "$KEY" = "ctrl-r" ] && [ -n "$SELECTION" ]; then
         RENAME_RESULT=$(mktemp /tmp/tmux-lazy-restore-rename.XXXXXX)
@@ -362,11 +293,11 @@ choose_session() {
           if tmux has-session -t="$SELECTION" 2>/dev/null; then
             tmux rename-session -t "$SELECTION" "$NEW_NAME"
           fi
-          jq --arg old "$SELECTION" --arg new "$NEW_NAME" '(.sessions[] | select(.name == $old) | .name) = $new' "$SESSION_FILE" > "$SESSION_FILE.tmp" && mv "$SESSION_FILE.tmp" "$SESSION_FILE"
+          jq --arg old "$SELECTION" --arg new "$NEW_NAME" '(.sessions[] | select(.name == $old) | .name) = $new' "$SESSION_FILE" | write_session_file
         fi
       elif [ "$KEY" = "ctrl-k" ] && [ -n "$SELECTION" ]; then
         if [ "$SELECTION" = "$DEFAULT_SESSION" ]; then true; else
-        jq --arg name "$SELECTION" 'del(.sessions[] | select(.name == $name))' "$SESSION_FILE" > "$SESSION_FILE.tmp" && mv "$SESSION_FILE.tmp" "$SESSION_FILE"
+        jq --arg name "$SELECTION" 'del(.sessions[] | select(.name == $name))' "$SESSION_FILE" | write_session_file
         tmux kill-session -t "$SELECTION"
         save_sessions; fi
       elif [ "$KEY" = "ctrl-l" ] && [ -n "$SELECTION" ]; then
@@ -389,54 +320,30 @@ choose_session() {
     fi
 }
 
-# Function: revert_session
-# Description: Revert the current session to its definition in the session file
-# Parameters:
-# Returns:
 revert_session() {
-  # Get the current session name
   session_name=$(tmux display-message -p '#{session_name}')
-
-  # Get the current session id
   current_session_id=$(tmux display-message -p '#{session_id}')
-
-  # Restore only that session
   restore_sessions "$session_name" "true"
 }
 
-# Function: delete_session
-# Description: Deletes only the current session from the sessions file
-# Parameters:
-# Returns:
 delete_session() {
-  # Get the current session name
   session_name=$(tmux display-message -p '#{session_name}')
 
   if [ "$session_name" = "$DEFAULT_SESSION" ]; then
     return
   fi
 
-  # Remove the session with the specified name from the session file
-  jq --arg session_name "$session_name" 'del(.sessions[] | select(.name == $session_name))' "$SESSION_FILE" > "$SESSION_FILE.tmp" && mv "$SESSION_FILE.tmp" "$SESSION_FILE"
+  jq --arg session_name "$session_name" 'del(.sessions[] | select(.name == $session_name))' "$SESSION_FILE" | write_session_file
 
-  # If there is more than 1 session
   if [ "$(tmux list-sessions | wc -l)" -gt 1 ]; then
-    # Switch to the previous session
     tmux switch-client -l
   fi
 
-  # Kill the current session
   tmux kill-session -t="$session_name" 2>/dev/null
 
   stop_spinner_with_message "SESSION DELETED"
 }
 
-# Function: get_tmux_option
-# Description: Helper function to get the value of a tmux option if set, otherwise use the default value
-# Parameters:
-#   $1 - Option name to get
-#   $2 - Default value if option is not set
-# Returns:
 get_tmux_option() {
 	local option_name="$1"
 	local default_value="$2"
@@ -448,44 +355,26 @@ get_tmux_option() {
 	fi
 }
 
-# Function: clear_session_contents
-# Description: Helper function to clear all windows/panes of the current session, leaving only one empty window/pane
-# Parameters:
-#   $1 - Current session name
-#   $2 - Current window id
-#   $3 - Current pane id
-# Returns:
 clear_session_contents() {
   current_session_name=$1
   current_window_id=$2
   current_pane_id=$3
 
-  # Loop through all windows in the current session
   tmux list-windows -t="$current_session_name" -F "#{window_name}:#{window_id}" | while IFS=: read -r window_name window_id; do
     if [ "$window_id" != "$current_window_id" ]; then
       tmux kill-window -t="$current_session_name:$window_id"
     fi
   done
 
-  # Loop through all panes in the current window
   tmux list-panes -t="$current_session_name:$current_window_id" -F "#{pane_id}" | while IFS= read -r pane_id; do
-    # If this pane is not the current pane
     if [ "$pane_id" != "$current_pane_id" ]; then
-      # Kill this pane
       tmux kill-pane -t "$pane_id"
     else
-      # This is the last pane, so just kill the running process of the current pane
       kill -KILL "$(get_pane_pid $current_pane_id)" 2>/dev/null
     fi
   done
 }
 
-# Function: get_pane_pid
-# Description: Helper function to get the pid for the specified pane
-# Parameters:
-#   $1 - The pane ID to get the PID for
-# Returns:
-#   The PID of the process running in the specified tmux pane
 get_pane_pid() {
   pane_id=$1
   local pane_pid=$(tmux display-message -p -t "$pane_id" "#{pane_pid}")
@@ -500,50 +389,33 @@ get_pane_pid() {
 set_last_active() {
   local session_name="$1"
   if ! jq -e 'has("last_active")' "$SESSION_FILE" > /dev/null 2>&1; then
-    jq '. + {"last_active":""}' "$SESSION_FILE" > "$SESSION_FILE.tmp" && mv "$SESSION_FILE.tmp" "$SESSION_FILE"
+    jq '. + {"last_active":""}' "$SESSION_FILE" | write_session_file
   fi
-  jq --arg name "$session_name" '.last_active = $name' "$SESSION_FILE" > "$SESSION_FILE.tmp" && mv "$SESSION_FILE.tmp" "$SESSION_FILE"
+  jq --arg name "$session_name" '.last_active = $name' "$SESSION_FILE" | write_session_file
 }
 
-# Function: start_spinner_with_message
-# Description: Helper function to start the progress spinner with a message
-# Parameters:
-#   $1 - Message to display
-# Returns:
 start_spinner_with_message() {
 	$CURRENT_DIR/spinner.sh "$1" &
 	export SPINNER_PID=$!
 }
 
-# Function: stop_spinner_with_message
-# Description: Helper function to stop the progress spinner with a message
-# Parameters:
-#   $1 - Message to display
-# Returns:
 stop_spinner_with_message() {
   STOP_MESSAGE=$1
 	kill $SPINNER_PID
 }
 
-
-# Get script directory
 CURRENT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-
-# Check if the session file location option is set, otherwise use default location
 SESSION_FILE=$(get_tmux_option @tmux-lazy-restore-session-file "$HOME/.config/tmux-lazy-restore/sessions.json")
 
-# Check if the session file exists, if not create the path and the a file with an empty sessions list
 if [ ! -f "$SESSION_FILE" ]; then
   mkdir -p "$(dirname "$SESSION_FILE")"
-  echo "{\"last_active\":\"\",\"sessions\":[]}" > $SESSION_FILE
+  echo '{"last_active":"","sessions":[]}' > "$SESSION_FILE"
 fi
 
 ensure_default_session
 
-# Check if the kill launch session option is set 
 KILL_LAUNCH_SESSION=$(get_tmux_option @tmux-lazy-restore-kill-launch-session "off")
 
-# Main
 case "$1" in
     choose)
         choose_session
@@ -579,7 +451,7 @@ case "$1" in
         fi
         ;;
     *)
-        echo "Usage: $0 {choose|update|revert|delete|save_all|auto_save|restore_all|startup}"
+        echo "Usage: $0 {choose|revert|delete|save_all|auto_save|restore_all|startup}"
         exit 1
         ;;
 esac
