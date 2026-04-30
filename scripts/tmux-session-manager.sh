@@ -102,12 +102,11 @@ restore_sessions() {
   current_pane_id=$(tmux display-message -p '#{pane_id}')
 
   if [ -n "$restore_session_name" ]; then
-    start_spinner_with_message "RESTORING: $restore_session_name"
     if tmux has-session -t="$restore_session_name" 2>/dev/null && [ "$force_restore" != "true" ]; then
       tmux switch-client -Z -t="${restore_session_name}"
-      stop_spinner_with_message "SESSION ALREADY RUNNING"
       return
     fi
+    start_spinner_with_message "RESTORING: $restore_session_name"
     sessions=$(jq -c --arg restore_session_name "$restore_session_name" '.sessions[] | select(.name == $restore_session_name)' "$SESSION_FILE")
   else
     start_spinner_with_message "RESTORING ALL SESSIONS"
