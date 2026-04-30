@@ -1,18 +1,5 @@
 #!/bin/bash
 
-DEFAULT_SESSION="default"
-
-ensure_default_session() {
-  local has_default=$(jq --arg name "$DEFAULT_SESSION" '.sessions[] | select(.name == $name)' "$SESSION_FILE")
-  if [ -z "$has_default" ]; then
-    local default_data="{\"name\":\"$DEFAULT_SESSION\",\"active\":\"0\",\"windows\":[{\"index\":0,\"name\":\"shell\",\"active\":\"1\",\"zoomed\":\"0\",\"layout\":\"ad5e,211x50,0,0,0\",\"panes\":[{\"index\":0,\"active\":\"1\",\"path\":\"$HOME\",\"command\":\"\"}]}]}"
-    jq --argjson new_data "$default_data" '.sessions += [$new_data]' "$SESSION_FILE" > "$SESSION_FILE.tmp" && mv "$SESSION_FILE.tmp" "$SESSION_FILE"
-  fi
-  if ! tmux has-session -t="$DEFAULT_SESSION" 2>/dev/null; then
-    tmux new-session -d -s "$DEFAULT_SESSION" -c "$HOME"
-  fi
-}
-
 write_session_file() {
   local tmp="${SESSION_FILE}.tmp.$$"
   cat > "$tmp" && mv "$tmp" "$SESSION_FILE"
@@ -296,21 +283,19 @@ choose_session() {
           jq --arg old "$SELECTION" --arg new "$NEW_NAME" '(.sessions[] | select(.name == $old) | .name) = $new' "$SESSION_FILE" | write_session_file
         fi
       elif [ "$KEY" = "ctrl-k" ] && [ -n "$SELECTION" ]; then
-        if [ "$SELECTION" = "$DEFAULT_SESSION" ]; then true; else
         jq --arg name "$SELECTION" 'del(.sessions[] | select(.name == $name))' "$SESSION_FILE" | write_session_file
         tmux kill-session -t "$SELECTION"
-        save_sessions; fi
+        save_sessions
       elif [ "$KEY" = "ctrl-l" ] && [ -n "$SELECTION" ]; then
         restore_sessions "$SELECTION" "true"
         set_last_active "$SELECTION"
       elif [ "$KEY" = "ctrl-u" ] && [ -n "$SELECTION" ]; then
-        if [ "$SELECTION" = "$DEFAULT_SESSION" ]; then true; else
         if tmux has-session -t="$SELECTION" 2>/dev/null; then
           if [ "$(tmux list-sessions | wc -l)" -gt 1 ]; then
             tmux switch-client -l
           fi
           tmux kill-session -t "$SELECTION"
-        fi; fi
+        fi
       elif [ -n "$SELECTION" ]; then
         restore_sessions "$SELECTION" "false"
         set_last_active "$SELECTION"
@@ -328,10 +313,6 @@ revert_session() {
 
 delete_session() {
   session_name=$(tmux display-message -p '#{session_name}')
-
-  if [ "$session_name" = "$DEFAULT_SESSION" ]; then
-    return
-  fi
 
   jq --arg session_name "$session_name" 'del(.sessions[] | select(.name == $session_name))' "$SESSION_FILE" | write_session_file
 
@@ -412,8 +393,6 @@ if [ ! -f "$SESSION_FILE" ]; then
   echo '{"last_active":"","sessions":[]}' > "$SESSION_FILE"
 fi
 
-ensure_default_session
-
 KILL_LAUNCH_SESSION=$(get_tmux_option @tmux-lazy-restore-kill-launch-session "off")
 
 case "$1" in
@@ -436,16 +415,12 @@ case "$1" in
         restore_sessions
         ;;
     startup)
-        if tmux has-session -t="0" 2>/dev/null && [ "$(tmux list-sessions 2>/dev/null | wc -l)" -eq 1 ]; then
-            tmux rename-session -t "0" "$DEFAULT_SESSION"
-        fi
-        ensure_default_session
-        if tmux has-session -t="$DEFAULT_SESSION" 2>/dev/null && [ "$(tmux list-sessions 2>/dev/null | wc -l)" -eq 1 ]; then
+        if [ "$(tmux list-sessions 2>/dev/null | wc -l)" -eq 1 ]; then
             target=$(jq -r '.last_active' "$SESSION_FILE")
-            if [ -z "$target" ] || [ "$target" = "null" ] || [ "$target" = "$DEFAULT_SESSION" ]; then
-                target=$(jq -r '[.sessions[] | select(.name != $default)][0].name' --arg default "$DEFAULT_SESSION" "$SESSION_FILE")
+            if [ -z "$target" ] || [ "$target" = "null" ]; then
+                target=$(jq -r '.sessions[0].name' "$SESSION_FILE")
             fi
-            if [ -n "$target" ] && [ "$target" != "null" ] && [ "$target" != "$DEFAULT_SESSION" ]; then
+            if [ -n "$target" ] && [ "$target" != "null" ]; then
                 restore_sessions "$target" "false"
             fi
         fi
